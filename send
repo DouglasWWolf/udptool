@@ -1,0 +1,117 @@
+#
+#  Usage:  send <packet_count> 
+#          A packet_count of zero halts any current transmission
+#
+#  Optional command line switches
+#          -port   <qsfp_port_number> (0 or 1)
+#          -cycles <64-byte_cycles_per_packet>
+#          -delay  <clock_cycles_between_packets>
+#
+
+
+#==============================================================================
+# This reads a PCI register and displays its value in decimal
+#==============================================================================
+read_reg()
+{
+  # Capture the value of the AXI register
+  text=$(pcireg $1)
+
+  # Extract just the first word of that text
+  text=($text)
+
+  # Convert the text into a number
+  value=$((text))
+
+  # Hand the value to the caller
+  echo $value
+}
+#==============================================================================
+
+
+# Find out how many packets the user wants us to send
+packet_count=$1
+
+# If no count was specified, we'll consider that a "halt"
+test -n "$packet_count" || packet_count=0;
+
+# Shift the command line parameters one to the left
+shift
+
+# Set up some defaults for packet control
+packet_delay=0;
+packet_cycles=16;
+port=0
+
+# Loop through each of the command-line arguments
+while (( "$#" )); do
+   if [ $1 == "-port" ]; then
+      port=$2
+   elif [ $1 == "-delay" ]; then
+      packet_delay=$2
+   elif [ $1 == "-cycles" ]; then 
+      packet_cycles=$2
+   else
+      echo "Invalid command line switch: $1"
+      exit 1
+   fi 
+    shift
+    shift
+done
+
+# Validate the port number
+if [ "$port" == "0" ]; then
+    BASE=0x1000
+elif [ "$port" == "1" ]; then
+    BASE=0x2000
+else
+    echo "Must specify -port 0 or 1"
+    exit 1
+fi 
+
+#
+# Define the control registers
+#
+MODULE_REV=$((BASE + 0x00))
+   COUNT_H=$((BASE + 0X04))
+   COUNT_L=$((BASE + 0x08))
+    CYCLES=$((BASE + 0x0C))
+     DELAY=$((BASE + 0x10))
+    STATUS=$((BASE + 0x14))
+
+
+# Check to make sure the PCI bus sees our FPGA
+reg=$(read_reg $MODULE_REV)
+if [ $reg -eq $((0xFFFFFFFF)) ]; then
+    echo "You forgot to issue a hot_reset"
+    exit 1
+fi
+
+# Are we trying to halt an ongoing transmission?
+if [ $packet_count -eq 0 ]; then
+   pcireg $COUNT_H 0
+   pcireg $COUNT_L 0
+   exit 0
+fi
+
+# Is the system already busy sending packets?
+reg=$(read_reg $STATUS)
+if [ $reg -eq 1 ]; then
+   echo "Tool is busy sending UDP datagrams"
+   exit 1
+fi
+
+# Make sure the Ethernet port has PCS alignment
+./align_pcs.sh $port || exit 1
+
+# Fetch the upper 32-bits of the packet_count
+upper32=$(($packet_count >> 32))
+
+# Fetch the lower 32-bits of the packet_count
+lower32=$(($packet_count & 0xFFFFFFFF))
+
+# Send some packets
+pcireg $CYCLES  $packet_cycles
+pcireg $DELAY   $packet_delay
+pcireg $COUNT_H $upper32
+pcireg $COUNT_L $lower32
